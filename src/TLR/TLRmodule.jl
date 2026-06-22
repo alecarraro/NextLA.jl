@@ -14,16 +14,29 @@ export TileMap, PackedTileStorage
 export ndiag_tiles, noffdiag_tiles, tile_geometry, pack!
 export ara_batched!, compress!
 
-include("tile_order.jl")
-include("tile_layout.jl")
-include("operator.jl")
-include("tlr_matrix.jl")
-include("pack_tiles.jl")
-include("ara_core.jl")
-include("ara_batched.jl")
-include("ara_operator.jl")
+# 1. types/
+# operator.jl defines AbstractTLROperator and TLRLinearOperator
+include("algorithms/operator.jl")
+# order.jl defines TileOrder which is used in TileMap and TLRMatrix
+include("layout/order.jl")
+# layout.jl defines TileMap which is used in TLRMatrix and PackedTileStorage
+include("layout/layout.jl")
+# matrix.jl defines TLRMatrix
+include("types/matrix.jl")
+
+# 2. layout/ (continued)
+# packing.jl defines pack! and depends on TileMap
+include("layout/packing.jl")
+
+# 3. algorithms/
+include("algorithms/ara/core.jl")
+include("algorithms/ara/batched.jl")
+include("algorithms/ara/operator.jl")
+include("algorithms/compress.jl")
+
+# experimental/
 include("experimental/rademacher_sampling.jl")
-include("compress.jl")
 include("experimental/ara_batched.jl")
 include("experimental/compress.jl")
+
 end
