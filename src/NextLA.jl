@@ -94,6 +94,7 @@ include("ttqrt.jl")
 include("TLR/TLRmodule.jl")
 using .TLRmodule: TileOrderStyle, TileOrder, ColMajor, RowMajor, TileColMajor, TileRowMajor
 using .TLRmodule: tile_stride, tile_coords, inverse_tile_coords
+using .TLRmodule: AbstractTLROperator, TLRLinearOperator
 using .TLRmodule: TLRMatrix, tile_linear_index, tile_rank_index, inverse_tile_index
 using .TLRmodule: TileMap, PackedTileStorage
 using .TLRmodule: ndiag_tiles, noffdiag_tiles, tile_geometry, pack!

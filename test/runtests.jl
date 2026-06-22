@@ -51,6 +51,12 @@ function matrix_generation(type, M, N; dist=:uniform, mode=:decay,
 end
 
 include("NextLAMatrix.jl")
+
+include("TLR/tlr_matrix.jl")
+include("TLR/ara_batched.jl")
+include("TLR/blackbox_sampling.jl")
+include("TLR/compress_operator.jl")
+
 include("lu.jl")
 include("unified_rectrxm.jl")
 include("trsm.jl")
