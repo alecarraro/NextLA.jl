@@ -149,6 +149,7 @@ function ara_batched_operator!(
     block_size::Int,
     eps;
     compress_diag::Bool=false,
+    required_samples::Int=10,
     backend=get_backend(U),
 ) where {T,RankT<:Integer}
     source = OperatorSamplingState(backend, T, op, layout, compress_diag, max_rank)
@@ -165,6 +166,7 @@ function ara_batched_operator!(
         block_size,
         eps,
         nothing;
+        required_samples,
         backend,
     )
 end

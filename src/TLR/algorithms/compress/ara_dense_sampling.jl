@@ -18,7 +18,7 @@ function _sample_range!(
 
     _ara_bgemm!(
         'N', 'N', one(T), backend,
-        source.tiles, size(source.tiles, 2), ws.M_ptrs, ws.Mcompact, active_idx,
+        source.tiles, size(source.tiles, 2), ws.A_ptrs, active_idx,
         Omega_active, ws.Omega_ptrs,
         zero(T),
         Y_current, ws.Y_ptrs,
@@ -50,7 +50,8 @@ function ara_batched!(
     M::AbstractArray{T,3},
     max_rank::Int,
     block_size::Int,
-    eps,
+    eps;
+    required_samples::Int=10,
 ) where {T,RankT<:Integer}
     get_backend(U) == get_backend(V) == get_backend(M) ||
         throw(ArgumentError("U, V, and M must have the same backend"))
@@ -68,6 +69,7 @@ function ara_batched!(
         block_size,
         eps,
         nothing;
+        required_samples,
         backend=get_backend(M),
     )
 end
