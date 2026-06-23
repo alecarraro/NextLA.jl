@@ -1,5 +1,3 @@
-using Adapt
-
 """Direct sampling state from a dense matrix without packing tiles."""
 struct DirectDenseSamplingState{MT<:AbstractMatrix, LM<:TileMap}
     A::MT
@@ -103,14 +101,17 @@ function _sample_range!(
             continue
         end
 
+        wave_active_idx_view = @view wave_active_idx[1:n_wave]
+        wave_slots_view = @view wave_slots[1:n_wave]
+
         # Build ptrs for this wave
         build_dense_A_ptrs_kernel!(backend)(
-            ws.A_ptrs, pointer(source.A), stride(source.A, 1), stride(source.A, 2), source.layout, wave_active_idx, n_wave;
+            ws.A_ptrs, pointer(source.A), stride(source.A, 1), stride(source.A, 2), source.layout, wave_active_idx_view, n_wave;
             ndrange=n_wave,
         )
 
-        _setup_ptrs!(ws.Omega_ptrs, Omega_active, wave_slots, n_wave, backend; scattered=true)
-        _setup_ptrs!(ws.Y_ptrs, Y_current, wave_slots, n_wave, backend; scattered=true)
+        _setup_ptrs!(ws.Omega_ptrs, Omega_active, wave_slots_view, n_wave, backend; scattered=true)
+        _setup_ptrs!(ws.Y_ptrs, Y_current, wave_slots_view, n_wave, backend; scattered=true)
 
         if backend isa CPU
             # Host access to filtered indices
