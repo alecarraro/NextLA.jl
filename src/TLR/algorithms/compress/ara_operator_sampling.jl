@@ -115,14 +115,20 @@ function _sample_corange!(
     V::AbstractArray{T,3},
     source::OperatorSamplingState,
     U::AbstractArray{T,3},
+    ranks,
     backend,
 ) where {T}
+    # For operator sampling, we must iterate over tiles since each tile corresponds
+    # to a specific global support.
     for batch in 1:size(V, 3)
+        # Use full U size for the corange step to allow batched operator application
+        # if the operator supports it, but here we still do it per tile.
+        rank = size(U, 2)
+
         linear = _full_tile_linear_index(source.layout, source.compress_diag, batch)
         tile_i, tile_j = inverse_tile_index(source.layout, linear)
         p0, q0 = tile_origin_coords(source.layout, tile_i, tile_j)
         tile_m, tile_n = tile_sizes(source.layout, tile_i, tile_j)
-        rank = size(U, 2)
 
         fill!(source.Ywork, zero(T))
         @views source.Ywork[p0:(p0 + tile_m - 1), 1:rank] .= U[1:tile_m, 1:rank, batch]

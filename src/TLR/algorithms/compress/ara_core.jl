@@ -357,52 +357,51 @@ function _ara_step!(
         potrf_status = @view ws.potrf_status[1:state.n_active]
         potrf_batched!('L', G_raw, potrf_status)
 
-        # Identify potrf successes to continue within the block
-        # Use survivor_flags as a temporary "success_flags"
+        # Identify potrf successes
         fill!(ws.survivor_flags, one(Int32))
         _mark_potrf_failures_as_non_survivors_kernel!(backend)(
             ws.survivor_flags, ws.potrf_status, ranks, state.active_idx, j_before, state.n_active;
             ndrange=state.n_active,
         )
 
-        # Compact failures away so they don't participate in the rest of the block
-        state.n_active = _compact_active_idx!(
+        # Compact failures away
+        n_surviving = _compact_active_idx!(
             state.spare_idx, ws.survivor_pos, state.active_idx, ws.survivor_flags, state.n_active, backend,
         )
 
-        state.n_active == 0 && return nothing
-
         # Compact Y and G for trsm
         compact_blocks3d_kernel!(backend)(
-            state.Y_spare, state.Y_buffer, ws.survivor_pos, size(state.Y_buffer, 1), sample_size, size(Y_current, 3);
-            ndrange=(size(state.Y_buffer, 1), sample_size, size(Y_current, 3)),
+            state.Y_spare, state.Y_buffer, ws.survivor_pos, size(state.Y_buffer, 1), sample_size, state.n_active;
+            ndrange=(size(state.Y_buffer, 1), sample_size, state.n_active),
         )
         compact_blocks3d_kernel!(backend)(
-            state.G_spare, state.G_buffer, ws.survivor_pos, sample_size, sample_size, size(Y_current, 3);
-            ndrange=(sample_size, sample_size, size(Y_current, 3)),
+            state.G_spare, state.G_buffer, ws.survivor_pos, sample_size, sample_size, state.n_active;
+            ndrange=(sample_size, sample_size, state.n_active),
         )
 
         state.Y_buffer, state.Y_spare = state.Y_spare, state.Y_buffer
         state.G_buffer, state.G_spare = state.G_spare, state.G_buffer
         state.active_idx, state.spare_idx = state.spare_idx, state.active_idx
+        state.n_active = n_surviving
         state.dense = false
+
+        state.n_active == 0 && return nothing
 
         Y_current = @view state.Y_buffer[:, 1:sample_size, 1:state.n_active]
         G_raw = @view state.G_buffer[1:sample_size, 1:sample_size, 1:state.n_active]
 
-        # trsm on the surviving (successful) tiles
+        # trsm on the surviving tiles
         trsm_batched!('R', 'L', transchar, 'N', G_raw, Y_current)
     end
 
     # After pass 2, Y_current is fully orthonormalized for the current block.
-    # We must scatter BEFORE compacting away converged tiles for the NEXT iteration.
+    # Scatter ALL successful tiles (including converged ones) to U.
     scatter_U_block_kernel!(backend)(
         U, Y_current, state.active_idx, j_before, sample_size, state.n_active;
         ndrange=(size(Y_current, 1), sample_size, state.n_active),
     )
 
-    # Now check for convergence after pass 2
-    # Convergence kernel will set ranks and survivor_flags=0 for converged tiles.
+    # Now check for convergence from the orthonormalized G_raw (which is R) of Pass 2.
     fill!(ws.survivor_flags, one(Int32))
     update_ara_convergence_from_Rdiag_kernel!(backend)(
         ranks, ws.small_sample_count, ws.sample_scale, ws.survivor_flags,
@@ -410,20 +409,16 @@ function _ara_step!(
         ndrange=state.n_active,
     )
 
-    # Final compaction for next block iteration
-    state.n_active = _compact_active_idx!(
+    # Final compaction for next block iteration: remove converged tiles.
+    n_surviving_next = _compact_active_idx!(
         state.spare_idx, ws.survivor_pos, state.active_idx, ws.survivor_flags, state.n_active, backend,
     )
 
-    if state.n_active > 0
-        # Compact Y for the next block's projection step?
-        # Actually Y is not needed for projection, U is.
-        # But state.Y_buffer needs to be ready if it's used for other things.
-        # However, _sample_range! overwrites Y_current.
-
+    if n_surviving_next > 0
         state.active_idx, state.spare_idx = state.spare_idx, state.active_idx
         state.dense = false
     end
+    state.n_active = n_surviving_next
 
     state.j += sample_size
     return nothing
@@ -526,7 +521,7 @@ function _ara_batched_impl!(
     if state.j > 0
         V_active = @view V[:, 1:state.j, :]
         U_active = @view U[:, 1:state.j, :]
-        _sample_corange!(V_active, source, U_active, backend)
+        _sample_corange!(V_active, source, U_active, ranks, backend)
     end
 
     return U, V, ranks

@@ -31,9 +31,12 @@ function _sample_corange!(
     V::AbstractArray{T,3},
     source::DenseSamplingState,
     U::AbstractArray{T,3},
+    ranks,
     backend,
 ) where {T}
     transchar = T <: Real ? 'T' : 'C'
+    # Use full j columns for batched execution, as state.j columns were allocated.
+    # The ranks will be used by the consumer to truncate.
     gemm_batched!(transchar, 'N', one(T), source.tiles, U, zero(T), V)
     return V
 end

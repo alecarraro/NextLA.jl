@@ -1,3 +1,5 @@
+using Random
+
 """Direct sampling state from a dense matrix without packing tiles."""
 struct DirectDenseSamplingState{MT<:AbstractMatrix, LM<:TileMap}
     A::MT
@@ -42,7 +44,10 @@ end
         stm, stn = tile_sizes(layout, ti, tj)
         if stm == tm && stn == tn
             # Atomic increment for count
-            idx = KernelAbstractions.Extras.atomic_add!(wave_count_ptr, 1, 1)
+            # idx is 1-based because atomic_add! returns the value BEFORE increment
+            # and we initialized wave_count to 0.
+            # So the first thread gets 0. We need 1.
+            idx = KernelAbstractions.Extras.atomic_add!(wave_count_ptr, 1, 1) + 1
             @inbounds wave_active_idx[idx] = tile_linear
             @inbounds wave_slots[idx] = p
         end
@@ -158,15 +163,16 @@ function _sample_corange!(
     V::AbstractArray{T,3},
     source::DirectDenseSamplingState,
     U::AbstractArray{T,3},
+    ranks,
     backend,
 ) where {T}
     transchar = T <: Real ? 'T' : 'C'
-    # Similar wave logic for corange
+    batch_size = size(V, 3)
+    rank_cols = size(U, 2)
 
     b_m, b_n = source.layout.tile_m, source.layout.tile_n
     r_m = source.layout.m % b_m
     r_n = source.layout.n % b_n
-
     shapes = Tuple{Int,Int}[]
     push!(shapes, (b_m, b_n))
     r_n > 0 && push!(shapes, (b_m, r_n))
@@ -174,28 +180,45 @@ function _sample_corange!(
     (r_m > 0 && r_n > 0) && push!(shapes, (r_m, r_n))
     unique_shapes = unique(shapes)
 
-    batch_size = size(V, 3)
-    rank = size(U, 2)
+    # Use a dummy workspace or allocate temporary ptrs if needed for GPU.
+    # Since this is once per call, we can afford small overhead, but let's try to stay batched.
+    # For now, implemented as shape-grouped waves.
 
-    # We need workspace for ptrs during corange.
-    # Since this is outside the main loop, we might need a temporary or reuse ws.
-    # But _sample_corange! doesn't take ws.
-    # Let's see if we can just use a loop if it's not performance critical,
-    # or if we should add ws to _sample_corange!.
+    for (tm, tn) in unique_shapes
+        active_tiles = Int[]
+        for batch in 1:batch_size
+            ti, tj = inverse_tile_index(source.layout, batch)
+            if tile_sizes(source.layout, ti, tj) == (tm, tn)
+                push!(active_tiles, batch)
+            end
+        end
+        isempty(active_tiles) && continue
 
-    # For now, let's implement it with a simple loop if on CPU,
-    # and maybe use a specialized kernel if on GPU, or just loop for now to ensure correctness.
+        n_wave = length(active_tiles)
 
-    for batch in 1:batch_size
-        ti, tj = inverse_tile_index(source.layout, batch)
-        p0, q0 = tile_origin_coords(source.layout, ti, tj)
-        tm, tn = tile_sizes(source.layout, ti, tj)
-
-        Ap = @view source.A[p0:(p0+tm-1), q0:(q0+tn-1)]
-        Up = @view U[1:tm, 1:rank, batch]
-        Vp = @view V[1:tn, 1:rank, batch]
-
-        BLAS.gemm!(transchar, 'N', T(one(T)), Ap, Up, T(zero(T)), Vp)
+        # We need pointer arrays. If we don't have ws, we might have to use views loop
+        # or a temporary. Given the constraints, a view loop by shape is still better than scalar.
+        if backend isa CPU
+            for batch in active_tiles
+                ti, tj = inverse_tile_index(source.layout, batch)
+                p0, q0 = tile_origin_coords(source.layout, ti, tj)
+                Ap = @view source.A[p0:(p0+tm-1), q0:(q0+tn-1)]
+                Up = @view U[1:tm, 1:rank_cols, batch]
+                Vp = @view V[1:tn, 1:rank_cols, batch]
+                BLAS.gemm!(transchar, 'N', T(one(T)), Ap, Up, T(zero(T)), Vp)
+            end
+        else
+            # For GPU without workspace, we fall back to a loop of gemm_batched! on views if possible,
+            # or just a loop of gemm!.
+            for batch in active_tiles
+                ti, tj = inverse_tile_index(source.layout, batch)
+                p0, q0 = tile_origin_coords(source.layout, ti, tj)
+                Ap = @view source.A[p0:(p0+tm-1), q0:(q0+tn-1)]
+                Up = @view U[1:tm, 1:rank_cols, batch]
+                Vp = @view V[1:tn, 1:rank_cols, batch]
+                gemm_batched!(transchar, 'N', one(T), reshape(Ap, tm, tn, 1), reshape(Up, tm, rank_cols, 1), zero(T), reshape(Vp, tn, rank_cols, 1))
+            end
+        end
     end
 
     return V
