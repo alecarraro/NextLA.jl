@@ -15,16 +15,15 @@ struct ARAWorkspace{AT,ST,IT,FT,PT}
     Z::AT
     G::AT
     Gscratch::AT
-    Mcompact::AT
-    Ucompact::AT
     potrf_status::FT
     active_idx::IT
     next_active_idx::IT
     survivor_pos::IT
     survivor_flags::FT
+    wave_count::FT
     small_sample_count::FT
     sample_scale::ST
-    M_ptrs::PT
+    A_ptrs::PT
     U_ptrs::PT
     Omega_ptrs::PT
     Y_ptrs::PT
@@ -54,13 +53,12 @@ function _allocate_ara_workspace(
         alloc(T, max_rank, max_block, batch_size),
         alloc(T, max_block, max_block, batch_size),
         alloc(T, max_block, max_block, batch_size),
-        alloc(T, m, n, batch_size),
-        alloc(T, m, max_rank, batch_size),
         alloc(Int32, batch_size),
         alloc(IdxT, batch_size),
         alloc(IdxT, batch_size),
         alloc(IdxT, batch_size),
         alloc(Int32, batch_size),
+        alloc(Int32, 1),
         alloc(Int32, batch_size),
         alloc(RT, batch_size),
         alloc(ptr_type, batch_size),
@@ -71,22 +69,6 @@ function _allocate_ara_workspace(
     )
 end
 
-"""Gather the currently active batch items into a compact 3D buffer."""
-@kernel function gather_active_blocks3d_kernel!(
-    dst,
-    src,
-    active_idx,
-    nrows::Int,
-    ncols::Int,
-    n_active::Int,
-)
-    row, col, p = @index(Global, NTuple)
-    if p <= n_active && row <= nrows && col <= ncols
-        tile = Int(@inbounds active_idx[p])
-        @inbounds dst[row, col, p] = src[row, col, tile]
-    end
-end
-
 """Initialize the active-set index vector to `1:batch_size`."""
 @kernel function initialize_active_idx_kernel!(active_idx, batch_size::Int)
     p = @index(Global)
@@ -95,52 +77,37 @@ end
     end
 end
 
-"""Initialize the per-tile convergence scale from the first sampled block."""
-@kernel function initialize_ara_scale_active_kernel!(
-    sample_scale,
-    G_block,
-    active_idx,
-    sample_size::Int,
-    n_active::Int,
-)
-    p = @index(Global)
-    if p <= n_active
-        tile = @inbounds active_idx[p]
-        scale = zero(eltype(sample_scale))
-        @inbounds for local_col in 1:sample_size
-            scale = max(scale, abs(real(G_block[local_col, local_col, p])))
-        end
-        @inbounds sample_scale[tile] = max(sample_scale[tile], scale)
-    end
-end
-
-"""Update convergence state and mark tiles that have reached the target rank."""
-@kernel function convergence_ara_active_kernel!(
+"""Update convergence state from the Cholesky factor diagonal R."""
+@kernel function update_ara_convergence_from_Rdiag_kernel!(
     ranks,
     small_sample_count,
     sample_scale,
     survivor_flags,
     G_block,
     active_idx,
-    eps,
+    reltol,
     j_before::Int,
     sample_size::Int,
-    required_small::Int,
+    required_samples::Int,
     n_active::Int,
 )
     p = @index(Global)
     if p <= n_active
         tile = @inbounds active_idx[p]
-        threshold = eps * max(one(eltype(sample_scale)), @inbounds(sample_scale[tile]))
         count = @inbounds small_sample_count[tile]
+        scale = @inbounds sample_scale[tile]
         survived = one(eltype(survivor_flags))
 
         @inbounds for local_col in 1:sample_size
-            dR = abs(real(G_block[local_col, local_col, p]))
-            if dR <= threshold
+            # d is the Cholesky diagonal after trsm/orthogonalization pass
+            d = abs(real(G_block[local_col, local_col, p]))
+            scale = max(scale, d)
+            threshold = reltol * scale
+
+            if d <= threshold
                 count += 1
-                if count >= required_small
-                    ranks[tile] = convert(eltype(ranks), max(0, j_before + local_col - required_small))
+                if count >= required_samples
+                    ranks[tile] = convert(eltype(ranks), max(0, j_before + local_col - required_samples))
                     survived = zero(eltype(survivor_flags))
                     break
                 end
@@ -150,6 +117,7 @@ end
         end
 
         @inbounds small_sample_count[tile] = count
+        @inbounds sample_scale[tile] = scale
         @inbounds survivor_flags[p] = survived
     end
 end
@@ -262,21 +230,11 @@ end
     return next_n_active
 end
 
-"""Gather active tiles into a contiguous buffer when strided access is no longer valid."""
-@inline function _gather_active_blocks!(dst, src::AbstractArray{T,3}, active_idx, nrows::Int, ncols::Int, n_active::Int, backend) where {T}
-    n_active > 0 || return dst
-    gather_active_blocks3d_kernel!(backend)(
-        dst, src, active_idx, nrows, ncols, n_active;
-        ndrange=(nrows, ncols, n_active),
-    )
-    return dst
-end
-
 """
     _ara_bgemm!
 
-Internal GEMM helper that switches between strided-batched, pointer-batched,
-and gathered execution depending on whether the active set is still dense.
+Internal GEMM helper that switches between strided-batched and pointer-batched
+execution depending on whether the active set is still dense.
 """
 @inline function _ara_bgemm!(
     transA::Char,
@@ -286,7 +244,6 @@ and gathered execution depending on whether the active set is still dense.
     A::AbstractArray{T,3},
     a_cols::Int,
     A_ptrs,
-    A_compact,
     active_idx,
     B::AbstractArray{T,3},
     B_ptrs,
@@ -314,9 +271,17 @@ and gathered execution depending on whether the active set is still dense.
             C_ptrs, @view(C[:, :, 1]),
             n_active,
         )
+    elseif backend isa CPU
+        # For CPU, we just use a loop over active tiles
+        for p in 1:n_active
+            tile = Int(active_idx[p])
+            Ap = @view A_use[:, :, tile]
+            Bp = @view B[:, :, p]
+            Cp = @view C[:, :, p]
+            BLAS.gemm!(transA, transB, T(alpha), Ap, Bp, T(beta), Cp)
+        end
     else
-        _gather_active_blocks!(A_compact, A_use, active_idx, size(A_use, 1), size(A_use, 2), n_active, backend)
-        gemm_batched!(transA, transB, alpha, @view(A_compact[:, 1:a_cols, 1:n_active]), B, beta, C)
+        throw(ArgumentError("ARA active-set compaction requires pointer-batched GEMM on this backend"))
     end
     return C
 end
@@ -342,8 +307,8 @@ function _ara_step!(
     ws::ARAWorkspace,
     state::ARAIterationState,
     sample_size::Int,
-    eps_rt,
-    required_small::Int,
+    reltol,
+    required_samples::Int,
     backend,
 )
     T = eltype(U)
@@ -370,7 +335,7 @@ function _ara_step!(
 
             _ara_bgemm!(
                 transchar, 'N', one(T), backend,
-                U, j_before, ws.U_ptrs, ws.Ucompact, state.active_idx,
+                U, j_before, ws.U_ptrs, state.active_idx,
                 Y_current, ws.Y_ptrs,
                 zero(T),
                 Z_active, ws.Z_ptrs,
@@ -379,7 +344,7 @@ function _ara_step!(
 
             _ara_bgemm!(
                 'N', 'N', -one(T), backend,
-                U, j_before, ws.U_ptrs, ws.Ucompact, state.active_idx,
+                U, j_before, ws.U_ptrs, state.active_idx,
                 Z_active, ws.Z_ptrs,
                 one(T),
                 Y_current, ws.Y_ptrs,
@@ -389,59 +354,89 @@ function _ara_step!(
 
         syrk_batched!('L', transchar, one(T), Y_current, zero(T), G_raw)
 
-        if pass == 1
-            if j_before == 0
-                initialize_ara_scale_active_kernel!(backend)(
-                    ws.sample_scale, G_raw, state.active_idx, sample_size, state.n_active;
-                    ndrange=state.n_active,
-                )
-            end
-
-            convergence_ara_active_kernel!(backend)(
-                ranks, ws.small_sample_count, ws.sample_scale, ws.survivor_flags,
-                G_raw, state.active_idx, eps_rt, j_before, sample_size, required_small, state.n_active;
-                ndrange=state.n_active,
-            )
-
-            state.n_active = _compact_active_idx!(
-                state.spare_idx, ws.survivor_pos, state.active_idx, ws.survivor_flags, state.n_active, backend,
-            )
-
-            state.n_active == 0 && return nothing
-
-            compacted = state.n_active != size(Y_current, 3)
-            if compacted
-                compact_blocks3d_kernel!(backend)(
-                    state.Y_spare, state.Y_buffer, ws.survivor_pos, size(state.Y_buffer, 1), sample_size, size(Y_current, 3);
-                    ndrange=(size(state.Y_buffer, 1), sample_size, size(Y_current, 3)),
-                )
-                compact_blocks3d_kernel!(backend)(
-                    state.G_spare, state.G_buffer, ws.survivor_pos, sample_size, sample_size, size(Y_current, 3);
-                    ndrange=(sample_size, sample_size, size(Y_current, 3)),
-                )
-
-                state.Y_buffer, state.Y_spare = state.Y_spare, state.Y_buffer
-                state.G_buffer, state.G_spare = state.G_spare, state.G_buffer
-                state.active_idx, state.spare_idx = state.spare_idx, state.active_idx
-                state.dense = false
-            end
-
-            Y_current = @view state.Y_buffer[:, 1:sample_size, 1:state.n_active]
-            G_raw = @view state.G_buffer[1:sample_size, 1:sample_size, 1:state.n_active]
-        end
-
         potrf_status = @view ws.potrf_status[1:state.n_active]
         potrf_batched!('L', G_raw, potrf_status)
+
+        # Identify potrf successes
+        fill!(ws.survivor_flags, one(Int32))
+        _mark_potrf_failures_as_non_survivors_kernel!(backend)(
+            ws.survivor_flags, ws.potrf_status, ranks, state.active_idx, j_before, state.n_active;
+            ndrange=state.n_active,
+        )
+
+        # Compact failures away
+        n_surviving = _compact_active_idx!(
+            state.spare_idx, ws.survivor_pos, state.active_idx, ws.survivor_flags, state.n_active, backend,
+        )
+
+        # Compact Y and G for trsm
+        compact_blocks3d_kernel!(backend)(
+            state.Y_spare, state.Y_buffer, ws.survivor_pos, size(state.Y_buffer, 1), sample_size, state.n_active;
+            ndrange=(size(state.Y_buffer, 1), sample_size, state.n_active),
+        )
+        compact_blocks3d_kernel!(backend)(
+            state.G_spare, state.G_buffer, ws.survivor_pos, sample_size, sample_size, state.n_active;
+            ndrange=(sample_size, sample_size, state.n_active),
+        )
+
+        state.Y_buffer, state.Y_spare = state.Y_spare, state.Y_buffer
+        state.G_buffer, state.G_spare = state.G_spare, state.G_buffer
+        state.active_idx, state.spare_idx = state.spare_idx, state.active_idx
+        state.n_active = n_surviving
+        state.dense = false
+
+        state.n_active == 0 && return nothing
+
+        Y_current = @view state.Y_buffer[:, 1:sample_size, 1:state.n_active]
+        G_raw = @view state.G_buffer[1:sample_size, 1:sample_size, 1:state.n_active]
+
+        # trsm on the surviving tiles
         trsm_batched!('R', 'L', transchar, 'N', G_raw, Y_current)
     end
 
+    # After pass 2, Y_current is fully orthonormalized for the current block.
+    # Scatter ALL successful tiles (including converged ones) to U.
     scatter_U_block_kernel!(backend)(
         U, Y_current, state.active_idx, j_before, sample_size, state.n_active;
         ndrange=(size(Y_current, 1), sample_size, state.n_active),
     )
 
+    # Now check for convergence from the orthonormalized G_raw (which is R) of Pass 2.
+    fill!(ws.survivor_flags, one(Int32))
+    update_ara_convergence_from_Rdiag_kernel!(backend)(
+        ranks, ws.small_sample_count, ws.sample_scale, ws.survivor_flags,
+        G_raw, state.active_idx, reltol, j_before, sample_size, required_samples, state.n_active;
+        ndrange=state.n_active,
+    )
+
+    # Final compaction for next block iteration: remove converged tiles.
+    n_surviving_next = _compact_active_idx!(
+        state.spare_idx, ws.survivor_pos, state.active_idx, ws.survivor_flags, state.n_active, backend,
+    )
+
+    if n_surviving_next > 0
+        state.active_idx, state.spare_idx = state.spare_idx, state.active_idx
+        state.dense = false
+    end
+    state.n_active = n_surviving_next
+
     state.j += sample_size
     return nothing
+end
+
+@kernel function _mark_potrf_failures_as_non_survivors_kernel!(survivor_flags, potrf_status, ranks, active_idx, j_before::Int, n_active::Int)
+    p = @index(Global)
+    if p <= n_active
+        info = @inbounds potrf_status[p]
+        if info != 0
+            @inbounds survivor_flags[p] = 0
+            tile = @inbounds active_idx[p]
+            # Salvage j_before + info - 1 columns if info > 0
+            # Since they are not yet orthonormalized by trsm, this is a conservative estimate.
+            # As per user policy: ranks[tile] = j_before.
+            @inbounds ranks[tile] = convert(eltype(ranks), j_before)
+        end
+    end
 end
 
 """
@@ -462,6 +457,7 @@ function _ara_batched_impl!(
     block_size::Int,
     eps,
     nblocks_ref::Union{Nothing,Base.RefValue{Int}};
+    required_samples::Int=10,
     backend=get_backend(U),
 ) where {T,RankT<:Integer}
     size(U, 1) == m || throw(DimensionMismatch("U must have $m rows"))
@@ -474,10 +470,10 @@ function _ara_batched_impl!(
 
     max_rank > 0 || throw(ArgumentError("max_rank must be positive"))
     block_size > 0 || throw(ArgumentError("block_size must be positive"))
+    required_samples > 0 || throw(ArgumentError("required_samples must be positive"))
 
     RT = typeof(real(zero(T)))
-    eps_rt = RT(eps)^2
-    required_small = block_size
+    reltol = RT(eps) / (RT(10) * RT(sqrt(2 / pi)))
     ptr_type = typeof(pointer(U))
     ws = _allocate_ara_workspace(backend, ptr_type, T, RankT, m, n, batch_size, max_rank, block_size)
 
@@ -512,8 +508,8 @@ function _ara_batched_impl!(
             ws,
             state,
             sample_size,
-            eps_rt,
-            required_small,
+            reltol,
+            required_samples,
             backend,
         )
     end
@@ -525,7 +521,7 @@ function _ara_batched_impl!(
     if state.j > 0
         V_active = @view V[:, 1:state.j, :]
         U_active = @view U[:, 1:state.j, :]
-        _sample_corange!(V_active, source, U_active, backend)
+        _sample_corange!(V_active, source, U_active, ranks, backend)
     end
 
     return U, V, ranks

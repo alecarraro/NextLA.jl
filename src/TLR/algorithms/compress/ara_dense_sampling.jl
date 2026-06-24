@@ -18,7 +18,7 @@ function _sample_range!(
 
     _ara_bgemm!(
         'N', 'N', one(T), backend,
-        source.tiles, size(source.tiles, 2), ws.M_ptrs, ws.Mcompact, active_idx,
+        source.tiles, size(source.tiles, 2), ws.A_ptrs, active_idx,
         Omega_active, ws.Omega_ptrs,
         zero(T),
         Y_current, ws.Y_ptrs,
@@ -31,9 +31,12 @@ function _sample_corange!(
     V::AbstractArray{T,3},
     source::DenseSamplingState,
     U::AbstractArray{T,3},
+    ranks,
     backend,
 ) where {T}
     transchar = T <: Real ? 'T' : 'C'
+    # Use full j columns for batched execution, as state.j columns were allocated.
+    # The ranks will be used by the consumer to truncate.
     gemm_batched!(transchar, 'N', one(T), source.tiles, U, zero(T), V)
     return V
 end
@@ -50,7 +53,8 @@ function ara_batched!(
     M::AbstractArray{T,3},
     max_rank::Int,
     block_size::Int,
-    eps,
+    eps;
+    required_samples::Int=10,
 ) where {T,RankT<:Integer}
     get_backend(U) == get_backend(V) == get_backend(M) ||
         throw(ArgumentError("U, V, and M must have the same backend"))
@@ -68,6 +72,7 @@ function ara_batched!(
         block_size,
         eps,
         nothing;
+        required_samples,
         backend=get_backend(M),
     )
 end
