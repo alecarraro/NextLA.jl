@@ -17,6 +17,7 @@ using ..NextLA: create_streams, with_stream, sync_stream, sync_streams_with_defa
 export TileColMajor, TileRowMajor
 export TLRMatrix
 export compress!
+export ara_compress, ara_compress!
 export uncompress!
 export tile_u, tile_v
 export blocksize, maxrank, ranks, dense_diag, dense_diag_corner, tilegrid_size
@@ -29,6 +30,7 @@ include("container/order.jl")
 include("container/tlrmatrix.jl")
 
 include("algorithms/compress.jl")
+include("algorithms/ara.jl")
 include("algorithms/uncompress.jl")
 include("algorithms/gemm/gemm.jl")
 

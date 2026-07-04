@@ -54,6 +54,8 @@ include("NextLAMatrix.jl")
 
 include("TLR/tilemap_and_constructor.jl")
 include("TLR/compress.jl")
+include("TLR/ara.jl")
+include("TLR/fb_ara.jl")
 include("TLR/gemm.jl")
 
 include("lu.jl")

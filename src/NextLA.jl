@@ -99,6 +99,6 @@ using .TLRmodule: TileColMajor, TileRowMajor
 using .TLRmodule: TLRMatrix
 using .TLRmodule: ndiag_tiles, noffdiag_tiles, tile_origin_coords, tile_size
 using .TLRmodule: blocksize, maxrank, ranks, dense_diag, dense_diag_corner, tilegrid_size, left_factors, right_factors
-using .TLRmodule: compress!, uncompress!, workspace_info
+using .TLRmodule: compress!, ara_compress, ara_compress!, fb_ara_compress, fb_ara_compress!, uncompress!, alloc_workspace, workspace_info
 using .TLRmodule: tile_u, tile_v
 end
