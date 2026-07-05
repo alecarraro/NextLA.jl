@@ -8,7 +8,7 @@ using LinearAlgebra, Printf, Random, Statistics
 # User parameters --------------------------------------------------------------
 n = [2048, 4096, 8192]
 b = [128, 256, 512]
-maxrank = [64, 128]
+maxrank = [32]
 warmup_runs = 1
 iterations = 3
 
